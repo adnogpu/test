@@ -1,0 +1,171 @@
+name: 任务执行器
+
+on:
+  workflow_dispatch:
+    inputs:
+      server_address:
+        description: '后端服务器 IP 地址'
+        required: true
+        type: string
+      parallel_jobs:
+        description: '同时运行几个独立任务（每个任务一个独立 GitHub Actions Job）'
+        required: true
+        type: string
+      threads_per_job:
+        description: '每个任务内开启几个浏览器线程'
+        required: true
+        type: string
+        default: '2'
+      registrations_per_thread:
+        description: '每个浏览器线程注册多少个账号'
+        required: true
+        type: string
+        default: '10'
+      failure_threshold:
+        description: '达到此失败数量时自动停止'
+        required: false
+        type: string
+        default: '2'
+      email_domain:
+        description: '临时邮箱域名'
+        required: false
+        type: string
+        default: 'htazmbb.shop'
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      server-ip: ${{ steps.config.outputs.server-ip }}
+      job-count: ${{ steps.config.outputs.job-count }}
+      thread-count: ${{ steps.config.outputs.thread-count }}
+      task-count: ${{ steps.config.outputs.task-count }}
+      domain: ${{ steps.config.outputs.domain }}
+      job-indices: ${{ steps.config.outputs.job-indices }}
+    steps:
+      - name: 解析参数
+        id: config
+        run: |
+          IP="${{ github.event.inputs.server_address }}"
+          JN="${{ github.event.inputs.parallel_jobs }}"
+          TN="${{ github.event.inputs.threads_per_job }}"
+          RC="${{ github.event.inputs.registrations_per_thread }}"
+
+          if [ -z "$IP" ]; then
+            echo "错误: 服务器地址不能为空"
+            exit 1
+          fi
+          if ! [[ "$JN" =~ ^[0-9]+$ ]] || [ "$JN" -lt 1 ]; then
+            echo "错误: 并行任务数不合法 ($JN)"
+            exit 1
+          fi
+          if ! [[ "$TN" =~ ^[0-9]+$ ]] || [ "$TN" -lt 1 ]; then
+            echo "错误: 线程数不合法 ($TN)"
+            exit 1
+          fi
+          if ! [[ "$RC" =~ ^[0-9]+$ ]] || [ "$RC" -lt 1 ]; then
+            echo "错误: 每线程注册数不合法 ($RC)"
+            exit 1
+          fi
+
+          echo "server-ip=${IP}" >> $GITHUB_OUTPUT
+          echo "job-count=${JN}" >> $GITHUB_OUTPUT
+          echo "thread-count=${TN}" >> $GITHUB_OUTPUT
+          echo "task-count=${RC}" >> $GITHUB_OUTPUT
+          echo "domain=${{ github.event.inputs.email_domain || 'htazmbb.shop' }}" >> $GITHUB_OUTPUT
+
+          INDICES=$(python3 -c "import json; print(json.dumps(list(range(int('$JN')))))")
+          echo "job-indices=${INDICES}" >> $GITHUB_OUTPUT
+
+  worker:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        idx: ${{ fromJson(needs.prepare.outputs.job-indices) }}
+      fail-fast: false
+      max-parallel: 10
+
+    steps:
+      - name: 初始化工作区
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 \
+            libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 \
+            libgbm1 libpango-1.0-0 libcairo2 libnspr4 libnss3 \
+            libasound2t64 libxshmfence1 libx11-xcb1 libxcb-dri3-0 \
+            libxfixes3 libxext6 libxinerama1 \
+            fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
+            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf \
+            xvfb
+
+      - name: 拉取执行脚本
+        env:
+          REPO_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+          REPO_URL: ${{ secrets.PRIVATE_REPO_URL }}
+        run: |
+          git clone --quiet --depth 1 \
+            "https://x-access-token:${REPO_PAT}@${REPO_URL}" \
+            _runner
+
+      - name: 安装 Python 依赖
+        run: |
+          cd _runner
+          pip install --upgrade pip
+          pip install -r reg_linux/requirements.txt
+
+      - name: 执行注册（任务 #${{ matrix.idx }}）
+        env:
+          TWITCH_CTF: "1"
+          LOGURU_LEVEL: INFO
+          FRONT_IP: ${{ needs.prepare.outputs.server-ip }}
+          REG_THREADS: ${{ needs.prepare.outputs.thread-count }}
+          REGISTER_COUNT: ${{ needs.prepare.outputs.task-count }}
+          FAILURE_THRESHOLD: ${{ github.event.inputs.failure_threshold }}
+          MAIL_DOMAINS: ${{ needs.prepare.outputs.domain }}
+          WORKER_ID: "w${{ matrix.idx }}_${{ github.run_id }}"
+        run: |
+          cd _runner
+          python3 -m reg_linux.main
+
+      - name: 收集输出
+        if: always()
+        run: |
+          mkdir -p _out/job-${{ matrix.idx }}
+          cp _runner/reg_linux/reg_linux_*.log _out/job-${{ matrix.idx }}/ 2>/dev/null || true
+          cp _runner/*.log _out/job-${{ matrix.idx }}/ 2>/dev/null || true
+          if [ -d "_runner/profiles" ]; then
+            cp -r _runner/profiles _out/job-${{ matrix.idx }}/ 2>/dev/null || true
+          fi
+          tar -czf _out/job-${{ matrix.idx }}.tar.gz -C _out "job-${{ matrix.idx }}"
+
+      - name: 上传结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: job-${{ matrix.idx }}-out
+          path: _out/job-${{ matrix.idx }}.tar.gz
+          retention-days: 7
+          if-no-files-found: ignore
+
+  summary:
+    needs: [prepare, worker]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: 完成
+        run: |
+          echo "全部任务执行完毕。"
+          echo "服务器地址: ${{ needs.prepare.outputs.server-ip }}"
+          echo "并行任务数: ${{ needs.prepare.outputs.job-count }}"
+          echo "每任务线程数: ${{ needs.prepare.outputs.thread-count }}"
+          echo "每线程注册数: ${{ needs.prepare.outputs.task-count }}"
