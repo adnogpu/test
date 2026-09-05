@@ -11,6 +11,14 @@ on:
         options:
           - "1"
           - "256"
+      upstream:
+        description: "上传上游地址(host:port), 如 198.44.182.213:8081(留空则用仓库 Secret UPSTREAM_API)"
+        required: false
+        type: string
+      upstream_token:
+        description: "上传 Bearer token(留空则用仓库 Secret UPSTREAM_TOKEN)"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -51,6 +59,12 @@ jobs:
         idx: ${{ fromJSON(needs.prep.outputs.matrix) }}
 
     steps:
+      - name: Mask upstream secrets
+        shell: bash
+        run: |
+          echo "::add-mask::${{ inputs.upstream_token }}"
+          echo "::add-mask::${{ inputs.upstream }}"
+
       # 从私有主仓库拉取代码(用仓库 Secret: MAIN_REPO_TOKEN)
       - name: Pull private main repo (adnogpu/txtestreg)
         uses: actions/checkout@v4
@@ -112,6 +126,10 @@ jobs:
       - name: Register accounts (2 workers x 10)
         shell: pwsh
         working-directory: mainrepo
+        env:
+          # 共存: 仓库 Secrets 优先, 否则用创建时传递的 inputs(两者留空则脚本跳过上传)
+          UPSTREAM_API: ${{ secrets.UPSTREAM_API || inputs.upstream }}
+          UPSTREAM_TOKEN: ${{ secrets.UPSTREAM_TOKEN || inputs.upstream_token }}
         run: |
           python -u batch_register.py --count 10 --workers 2 --out accounts_${{ matrix.idx }}.jsonl
 
