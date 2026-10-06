@@ -7,7 +7,7 @@ on:
         description: '前端服务器 IP 地址'
         required: true
         type: string
-        default: '198.44.182.98'
+        default: '198.44.182.20'
       THREAD:
         description: '每个 Job 内的线程数量'
         required: true
@@ -27,7 +27,7 @@ on:
         description: '挂宝前是否关注直播间（关注大概率被 Twitch 手机验证关卡挡住，见 README）'
         required: false
         type: boolean
-        default: true
+        default: false
       PREFER_NOSTOCK:
         description: '是否优先处理暂无库存账号（取到这类号先试领码，没补货整挂一轮再试，仍没补货才标记缺货）'
         required: false
